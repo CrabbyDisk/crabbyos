@@ -67,29 +67,37 @@ pub mod alloc {
 
             *pointer = Some(0);
         }
-        unsafe fn alloc(&mut self, pointer: &mut Node) -> PAddr {
+        unsafe fn alloc(&mut self, pointer: &mut Node) -> usize {
             let allocated = pointer.unwrap();
             *pointer = self.pages[allocated].node;
-            PAddr::new(&self.pages[allocated] as *const _ as usize)
+            allocated
         }
 
-        unsafe fn zalloc(&mut self, pointer: &mut Node) -> PAddr {
-            let allocated = pointer.unwrap();
-            *pointer = self.pages[allocated].node;
+        unsafe fn zalloc(&mut self, pointer: &mut Node) -> usize {
+            let allocated = self.alloc(pointer);
             self.pages[allocated].page = [0; PAGE_SIZE];
-            PAddr::new(&self.pages[allocated] as *const _ as usize)
+            allocated
         }
 
-        unsafe fn free(&mut self, addr: PAddr, pointer: &mut Node) {
-            let freed: usize =
-                (addr.0 as *const LinkedPage).offset_from_unsigned(&self.pages[0] as *const _);
+        unsafe fn free(&mut self, idx: usize, pointer: &mut Node) {
+            let freed: usize = idx;
             self.pages[freed].node = *pointer;
             *pointer = Some(freed);
+        }
+
+        fn get_index_addr(&self, idx: usize) -> PAddr {
+            PAddr::new(&self.pages[idx] as *const _ as usize)
+        }
+        fn get_addr_index(&self, addr: PAddr) -> usize {
+            let base = self as *const _;
+            let other = addr.0 as *const Allocator<N>;
+            unsafe { other.offset_from_unsigned(base) }
         }
     }
 
     unsafe extern "C" {
         #[link_name = "_heap_start"]
+        #[allow(improper_ctypes)]
         static mut HEAP: Allocator<16384>;
     }
     static mut LIST_HEAD: Node = None;
@@ -99,15 +107,24 @@ pub mod alloc {
     }
 
     pub fn alloc() -> PAddr {
-        unsafe { HEAP.alloc(&mut LIST_HEAD) }
+        unsafe {
+            let idx = HEAP.alloc(&mut LIST_HEAD);
+            HEAP.get_index_addr(idx)
+        }
     }
 
     pub fn zalloc() -> PAddr {
-        unsafe { HEAP.zalloc(&mut LIST_HEAD) }
+        unsafe {
+            let idx = HEAP.zalloc(&mut LIST_HEAD);
+            HEAP.get_index_addr(idx)
+        }
     }
 
     pub fn free(addr: PAddr) {
-        unsafe { HEAP.free(addr, &mut LIST_HEAD) }
+        unsafe {
+            let idx = HEAP.get_addr_index(addr);
+            HEAP.free(idx, &mut LIST_HEAD)
+        }
     }
 }
 
