@@ -1,0 +1,22 @@
+[package]
+name = "crabbyos"
+version = "0.1.0"
+edition = "2024"
+test = false
+
+[[bin]]
+name = "crabbyos"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+bitflags = "2.9.1"
+riscv = "0.14.0"
+volatile-register = "0.2.2"
+
+[profile.release]
+opt-level = 3
+debug = "full"
+split-debuginfo = "packed"
