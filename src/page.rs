@@ -156,6 +156,14 @@ pub mod vmm {
             self.0 & (EntryFlags::RWX.bits() as usize) == 0
         }
 
+        fn as_table_mut(&mut self) -> Option<&mut Table> {
+            if self.is_branch() && self.is_valid() {
+                Some(unsafe { (self.as_address().0 as *mut Table).as_mut_unchecked() })
+            } else {
+                None
+            }
+        }
+
         pub fn as_address(&self) -> PAddr {
             PAddr::new((self.0 << 2) & !0xFFF)
         }
@@ -232,26 +240,19 @@ pub mod vmm {
     impl Drop for AddrSpaceHandle {
         fn drop(&mut self) {
             if let Some(root) = unsafe { self.ptr.as_mut() } {
-                for lv2 in 0..Table::len() {
-                    let entry_lv2 = root[lv2];
-                    if entry_lv2.is_valid() && entry_lv2.is_branch() {
-                        // This is a valid entry, so drill down and free.
-                        let memaddr_lv1 = entry_lv2.as_address();
-                        let table_lv1 = unsafe {
-                            // Make table_lv1 a mutable reference instead of a pointer.
-                            (memaddr_lv1.0 as *mut Table).as_mut().unwrap()
-                        };
-                        for lv1 in 0..Table::len() {
-                            let entry_lv1 = &table_lv1[lv1];
-                            if entry_lv1.is_valid() && entry_lv1.is_branch() {
-                                let memaddr_lv0 = entry_lv1.as_address();
+                for entry_lvl2 in root.0.iter_mut() {
+                    // This is a valid entry, so drill down and free.
+                    if let Some(table) = entry_lvl2.as_table_mut() {
+                        // Make table_lv1 a mutable reference instead of a pointer.
+                        for entry_lv1 in table.0.iter_mut() {
+                            if let Some(table) = entry_lv1.as_table_mut() {
                                 // The next level is level 0, which
                                 // cannot have branches, therefore,
                                 // we free here.
-                                free(memaddr_lv0);
+                                free(PAddr::new(table as *mut _ as usize));
                             }
                         }
-                        free(memaddr_lv1);
+                        free(PAddr::new(table as *mut _ as usize));
                     }
                 }
             }
