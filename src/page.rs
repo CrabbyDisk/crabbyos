@@ -56,7 +56,7 @@ pub mod alloc {
     }
 
     impl<const N: usize> Allocator<N> {
-        unsafe fn init(&mut self, pointer: &mut Node) {
+        unsafe fn init(&mut self, head: &mut Node) {
             for (i, page) in self.pages.iter_mut().enumerate() {
                 if i == N - 1 {
                     page.node = None;
@@ -65,28 +65,29 @@ pub mod alloc {
                 }
             }
 
-            *pointer = Some(0);
+            *head = Some(0);
         }
-        unsafe fn alloc(&mut self, pointer: &mut Node) -> usize {
-            let allocated = pointer.unwrap();
-            *pointer = self.pages[allocated].node;
+        unsafe fn alloc(&mut self, head: &mut Node) -> usize {
+            let allocated = head.unwrap();
+            *head = self.pages[allocated].node;
             allocated
         }
 
-        unsafe fn zalloc(&mut self, pointer: &mut Node) -> usize {
-            let allocated = self.alloc(pointer);
+        unsafe fn zalloc(&mut self, head: &mut Node) -> usize {
+            let allocated = self.alloc(head);
             self.pages[allocated].page = [0; PAGE_SIZE];
             allocated
         }
 
-        unsafe fn free(&mut self, idx: usize, pointer: &mut Node) {
+        unsafe fn free(&mut self, idx: usize, head: &mut Node) {
             let freed: usize = idx;
-            self.pages[freed].node = *pointer;
-            *pointer = Some(freed);
+            self.pages[freed].node = *head;
+            *head = Some(freed);
         }
 
         fn get_index_addr(&self, idx: usize) -> PAddr {
-            PAddr::new(&self.pages[idx] as *const _ as usize)
+            let val = &self.pages[idx];
+            PAddr::new(val as *const _ as usize)
         }
         fn get_addr_index(&self, addr: PAddr) -> usize {
             let base = self as *const _;
@@ -100,6 +101,7 @@ pub mod alloc {
         #[allow(improper_ctypes)]
         static mut HEAP: Allocator<16384>;
     }
+
     static mut LIST_HEAD: Node = None;
 
     pub fn init() {
@@ -129,7 +131,10 @@ pub mod alloc {
 }
 
 pub mod vmm {
-    use core::ops::{Index, IndexMut};
+    use core::{
+        ops::{Index, IndexMut},
+        ptr::null_mut,
+    };
 
     use crate::page::{
         PAddr, VAddr,
@@ -204,39 +209,62 @@ pub mod vmm {
         }
     }
 
+    #[derive(Debug)]
     #[repr(transparent)]
-    pub struct AddrSpace {
-        root: Table,
+    pub struct AddrSpaceHandle {
+        ptr: *mut Table,
     }
 
-    impl AddrSpace {
-        pub const fn new() -> Self {
-            Self {
-                root: Table([Entry(0); 512]),
-            }
+    impl AddrSpaceHandle {
+        pub const fn null() -> Self {
+            Self { ptr: null_mut() }
         }
     }
 
-    impl Default for AddrSpace {
+    impl Default for AddrSpaceHandle {
         fn default() -> Self {
             Self {
-                root: Table([Entry(0); 512]),
+                ptr: zalloc().0 as *mut _,
             }
         }
     }
 
-    impl Drop for AddrSpace {
+    impl Drop for AddrSpaceHandle {
         fn drop(&mut self) {
-            self.free();
+            if let Some(root) = unsafe { self.ptr.as_mut() } {
+                for lv2 in 0..Table::len() {
+                    let entry_lv2 = root[lv2];
+                    if entry_lv2.is_valid() && entry_lv2.is_branch() {
+                        // This is a valid entry, so drill down and free.
+                        let memaddr_lv1 = entry_lv2.as_address();
+                        let table_lv1 = unsafe {
+                            // Make table_lv1 a mutable reference instead of a pointer.
+                            (memaddr_lv1.0 as *mut Table).as_mut().unwrap()
+                        };
+                        for lv1 in 0..Table::len() {
+                            let entry_lv1 = &table_lv1[lv1];
+                            if entry_lv1.is_valid() && entry_lv1.is_branch() {
+                                let memaddr_lv0 = entry_lv1.as_address();
+                                // The next level is level 0, which
+                                // cannot have branches, therefore,
+                                // we free here.
+                                free(memaddr_lv0);
+                            }
+                        }
+                        free(memaddr_lv1);
+                    }
+                }
+            }
         }
     }
 
-    impl AddrSpace {
-        pub fn map(&mut self, vaddr: VAddr, paddr: PAddr, bits: EntryFlags) {
+    impl AddrSpaceHandle {
+        pub fn map(&self, vaddr: VAddr, paddr: PAddr, bits: EntryFlags) {
             let vpn = vaddr.vpn();
             let ppn = paddr.ppn();
+            let root = unsafe { self.ptr.as_mut_unchecked() };
 
-            let mut entry = &mut self.root[vpn[2]];
+            let mut entry = &mut root[vpn[2]];
 
             for i in (0..2).rev() {
                 if !entry.is_valid() {
@@ -258,30 +286,8 @@ pub mod vmm {
 			(bits | EntryFlags::V).bits() as usize;
             *entry = Entry::new(bits);
         }
-
-        fn free(&mut self) {
-            for lv2 in 0..Table::len() {
-                let entry_lv2 = &self.root[lv2];
-                if entry_lv2.is_valid() && entry_lv2.is_branch() {
-                    // This is a valid entry, so drill down and free.
-                    let memaddr_lv1 = entry_lv2.as_address();
-                    let table_lv1 = unsafe {
-                        // Make table_lv1 a mutable reference instead of a pointer.
-                        (memaddr_lv1.0 as *mut Table).as_mut().unwrap()
-                    };
-                    for lv1 in 0..Table::len() {
-                        let entry_lv1 = &table_lv1[lv1];
-                        if entry_lv1.is_valid() && entry_lv1.is_branch() {
-                            let memaddr_lv0 = entry_lv1.as_address();
-                            // The next level is level 0, which
-                            // cannot have branches, therefore,
-                            // we free here.
-                            free(memaddr_lv0);
-                        }
-                    }
-                    free(memaddr_lv1);
-                }
-            }
+        pub fn get_ptr(&self) -> *mut Table {
+            self.ptr
         }
     }
 }

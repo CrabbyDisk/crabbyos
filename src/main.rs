@@ -8,19 +8,18 @@ mod uart;
 
 use riscv::register::{self, mepc, mstatus, pmpaddr0, pmpcfg0, satp};
 
-use crate::{
-    page::{
-        PAGE_SIZE, PAddr, VAddr,
-        alloc::{self, zalloc},
-        vmm::{AddrSpace, Entry, EntryFlags},
-    },
-    uart::{serial_put_byte, serial_read_byte},
+use page::{
+    PAGE_SIZE, PAddr, VAddr,
+    vmm::{AddrSpaceHandle, EntryFlags},
 };
+
 use core::{
     arch::{asm, global_asm},
     panic,
-    ptr::{null, null_mut},
 };
+
+global_asm!(include_str!("./entry.s"));
+
 unsafe extern "C" {
     #[link_name = "_text_start"]
     safe static TEXT_START: u8;
@@ -47,16 +46,15 @@ unsafe extern "C" {
     #[link_name = "_heap_end"]
     safe static HEAP_END: u8;
 }
-global_asm!(include_str!("./entry.s"));
 
-static mut KASPACE: *mut AddrSpace = null_mut();
+static mut KASPACE: AddrSpaceHandle = AddrSpaceHandle::null();
 
-pub fn id_map_range(root: &mut AddrSpace, start: usize, end: usize, bits: EntryFlags) {
+pub fn id_map_range(root: &AddrSpaceHandle, start: usize, end: usize, bits: EntryFlags) {
     let num_kb_pages = (end - start) / PAGE_SIZE;
     let mut memaddr = start;
 
     for _ in 0..num_kb_pages {
-        page::vmm::AddrSpace::map(root, VAddr::new(memaddr), PAddr::new(memaddr), bits);
+        page::vmm::AddrSpaceHandle::map(root, VAddr::new(memaddr), PAddr::new(memaddr), bits);
         memaddr += 1 << 12;
     }
 }
@@ -65,11 +63,10 @@ pub fn id_map_range(root: &mut AddrSpace, start: usize, end: usize, bits: EntryF
 unsafe fn _init() -> ! {
     // Do NOT fucking forget to do this
     page::alloc::init();
-    let addr = zalloc();
-    unsafe { KASPACE = addr.0 as *mut AddrSpace };
-    let kaspace = unsafe { KASPACE.as_mut_unchecked() };
 
-    // Map text section
+    KASPACE = AddrSpaceHandle::default();
+    let kaspace = unsafe { &KASPACE };
+
     id_map_range(
         kaspace,
         &TEXT_START as *const u8 as usize,
@@ -116,18 +113,18 @@ unsafe fn _init() -> ! {
         PAddr::new(0x1000_0000),
         EntryFlags::RW,
     );
-    kprint!("test");
-    let root_ppn = KASPACE as usize >> 12;
+    // Set the SATP register
+    let root_ppn = KASPACE.get_ptr() as usize >> 12;
     satp::set(satp::Mode::Sv39, 0, root_ppn);
+    // Set MPP
     mstatus::set_mpp(mstatus::MPP::Supervisor);
+    // Initialize the PMP
+    // TODO
+    pmpaddr0::write(usize::MAX);
+    pmpcfg0::set_pmp(0, register::Range::NAPOT, register::Permission::RWX, false);
 
     let f: extern "C" fn() -> ! = kmain;
     mepc::write(f as usize);
-    pmpaddr0::write(usize::MAX);
-    pmpcfg0::set_pmp(0, register::Range::NAPOT, register::Permission::RWX, false);
-    kprint!("{:x}", mepc::read());
-    kprint!("{:?}", satp::read());
-    kprint!("{:?}", mstatus::read());
     asm!("mret");
     panic!();
 }
@@ -135,7 +132,7 @@ unsafe fn _init() -> ! {
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
     kprint!("hello from supervisor mode");
-    panic!()
+    loop {}
 }
 
 #[panic_handler]

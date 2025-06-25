@@ -1,8 +1,9 @@
 tui enable
 define reload
-	target extended-remote localhost:1234
+	shell cargo build --release > /dev/null 2>&1
 	directory
-	add-symbol-file target/riscv64gc-unknown-none-elf/release/crabbyos
+	symbol-file target/riscv64gc-unknown-none-elf/release/crabbyos
+	target extended-remote localhost:1234
 	continue
 end
 set pagination off
